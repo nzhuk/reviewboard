@@ -1,5 +1,6 @@
 import logging
 import urllib2
+import base64
 
 try:
     from urllib2 import quote as urllib_quote
@@ -20,9 +21,9 @@ class HgTool(SCMTool):
     }
 
     def __init__(self, repository):
-        SCMTool.__init__(self, repository)
+    	SCMTool.__init__(self, repository)
         if repository.path.startswith('http'):
-            self.client = HgWebClient(repository.path,
+            self.client = HgWebClient(repository.name,
                                       repository.username,
                                       repository.password)
         else:
@@ -164,15 +165,16 @@ class HgDiffParser(DiffParser):
         else:
             return False
 
+# HgWebClient class is really for BitBucket only
 class HgWebClient(object):
-    FULL_FILE_URL = '%(url)s/%(rawpath)s/%(revision)s/%(quoted_path)s'
+    FULL_FILE_URL = 'https://bitbucket.org/api/1.0/repositories/%(username)s/%(repository)s/raw/%(revision)s/%(quoted_path)s'
 
-    def __init__(self, repoPath, username, password):
-        self.url = repoPath
+    def __init__(self, repoName, username, password):
+        self.name = repoName
         self.username = username
         self.password = password
-        logging.debug('Initialized HgWebClient with url=%r, username=%r',
-                      self.url, self.username)
+        logging.debug('Initialized HgWebClient with name=%r, username=%r',
+                      self.name, self.username)
 
     def cat_file(self, path, rev="tip"):
         if rev == HEAD or rev == UNKNOWN:
@@ -181,35 +183,30 @@ class HgWebClient(object):
             rev = ""
 
         found = False
+		
+        try:
+            full_url = self.FULL_FILE_URL % {
+                   'username': self.username,
+                   'repository': self.name,
+                   'revision': rev,
+                   'quoted_path': urllib_quote(path.lstrip('/')),
+            }
+            request = urllib2.Request(full_url)
+            authHeader = base64.encodestring('%s:%s' % (self.username, self.password)).replace('\n', '')
+            request.add_header("Authorization", "Basic %s" % authHeader)   
+            result = urllib2.urlopen(request)
+            return result.read();
+            
+        except urllib2.HTTPError, e:
 
-        for rawpath in ["raw-file", "raw"]:
-            full_url = ''
+        	if e.code != 404:
+        	    logging.error("%s: HTTP error code %d when fetching "
+        	    "file from %s: %s", self.__class__.__name__,
+                e.code, full_url, e)
 
-            try:
-                passman = urllib2.HTTPPasswordMgrWithDefaultRealm()
-                passman.add_password(None, self.url, self.username,
-                                     self.password)
-                authhandler = urllib2.HTTPBasicAuthHandler(passman)
-                opener = urllib2.build_opener(authhandler)
-                full_url = self.FULL_FILE_URL % {
-                    'url': self.url.rstrip('/'),
-                    'rawpath': rawpath,
-                    'revision': rev,
-                    'quoted_path': urllib_quote(path.lstrip('/')),
-                }
-                f = opener.open(full_url)
-                return f.read()
-
-            except urllib2.HTTPError, e:
-
-                if e.code != 404:
-                    logging.error("%s: HTTP error code %d when fetching "
-                                  "file from %s: %s", self.__class__.__name__,
-                                  e.code, full_url, e)
-
-            except Exception:
-                logging.exception('%s: Non-HTTP error when fetching %r: ',
-                                  self.__class__.__name__, full_url)
+        except Exception:
+            logging.exception('%s: Non-HTTP error when fetching %r: ',
+            self.__class__.__name__, full_url)
 
         if not found:
             raise FileNotFoundError(path, rev, str(e))
